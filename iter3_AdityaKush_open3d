@@ -1,0 +1,231 @@
+#This iter produces correct segmented joints, but 3dmodel rendering with open3d is not triangulating properly.
+
+
+# Import necessary libraries
+import os
+import cv2
+import mediapipe as mp
+import numpy as np
+import open3d as o3d
+import json
+
+# Define local paths to your data
+base_path = "C:\\Users\\Aditya Kushwaha\\Downloads\\Quidich-HACKATHON-25-20250322T154624Z-001\\Quidich-HACKATHON-25"
+im_233_path = os.path.join(base_path, "233_im")
+im_235_path = os.path.join(base_path, "235_im")
+rotation_vectors_path = os.path.join(base_path, "extrinsic.json")
+camera_matrix_path = os.path.join(base_path, "intrinsic.json")
+
+# Load rotation vectors and camera calibration data
+with open(rotation_vectors_path, 'r') as f:
+    extrinsic_data = json.load(f)
+with open(camera_matrix_path, 'r') as f:
+    intrinsic_data = json.load(f)
+
+# Extract camera matrices and distortion coefficients
+camera_matrix_233 = np.array(intrinsic_data["C233"]["camera_matrix"])
+camera_matrix_235 = np.array(intrinsic_data["C235"]["camera_matrix"])
+dist_coeffs_233 = np.array(intrinsic_data["C233"]["distortion_coefficients"])
+dist_coeffs_235 = np.array(intrinsic_data["C235"]["distortion_coefficients"])
+
+# Extract rotation and translation vectors
+rot_vec_233 = np.array(extrinsic_data["rotation_vectors"]["C233"])
+trans_vec_233 = np.array(extrinsic_data["translation_vectors"]["C233"])
+rot_vec_235 = np.array(extrinsic_data["rotation_vectors"]["C235"])
+trans_vec_235 = np.array(extrinsic_data["translation_vectors"]["C235"])
+
+# MediaPipe Pose setup
+mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils
+
+def detect_pose(image):
+    """Detect pose landmarks in an image using MediaPipe."""
+    with mp_pose.Pose(static_image_mode=True) as pose:
+        results = pose.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        if results.pose_landmarks:
+            return results.pose_landmarks.landmark, results.pose_landmarks
+        return None, None
+
+def triangulate_points(landmarks_233, landmarks_235, img_233, img_235):
+    """Triangulate 3D points using camera matrices and landmarks."""
+    img_height_233, img_width_233 = img_233.shape[:2]
+    img_height_235, img_width_235 = img_235.shape[:2]
+    
+    # Convert landmarks to pixel coordinates
+    points_233 = np.array([[lm.x * img_width_233, lm.y * img_height_233] for lm in landmarks_233], dtype=np.float32).T
+    points_235 = np.array([[lm.x * img_width_235, lm.y * img_height_235] for lm in landmarks_235], dtype=np.float32).T
+
+    # Compute rotation matrices
+    R_233, _ = cv2.Rodrigues(rot_vec_233)
+    R_235, _ = cv2.Rodrigues(rot_vec_235)
+    
+    # Compute projection matrices
+    P_233 = camera_matrix_233 @ np.hstack((R_233, trans_vec_233))
+    P_235 = camera_matrix_235 @ np.hstack((R_235, trans_vec_235))
+
+    # Triangulate points to get 3D coordinates
+    points_4d_homogeneous = cv2.triangulatePoints(P_233, P_235, points_233, points_235)
+    
+    # Convert from homogeneous coordinates to 3D coordinates
+    points_3d = (points_4d_homogeneous[:3] / points_4d_homogeneous[3]).T
+    
+    return points_3d
+
+def visualize_3d_pose_with_skeleton(joint_locations):
+    """Visualize 3D pose with skeletal connections using Open3D with color coding."""
+    # Define connections (MediaPipe POSE_CONNECTIONS format)
+    connections = [
+        (0, 1), (1, 2), (2, 3), (3, 4),      # Head to shoulders
+        (5, 6), (6, 7), (7, 8),              # Left arm
+        (9, 10), (10, 11), (11, 12),         # Right arm
+        (5, 11),                             # Shoulders connection
+        (11, 23), (23, 24),                  # Spine to hips
+        (24, 25), (25, 26),                  # Left leg
+        (24, 27), (27, 28)                   # Right leg
+    ]
+    
+    # Create PointCloud for joints
+    point_cloud = o3d.geometry.PointCloud()
+    point_cloud.points = o3d.utility.Vector3dVector(joint_locations)
+    
+    # Create LineSet for connections
+    lines = o3d.geometry.LineSet()
+    lines.points = o3d.utility.Vector3dVector(joint_locations)
+    lines.lines = o3d.utility.Vector2iVector(connections)
+    
+    # Color code different body parts
+    # Red for head, blue for arms, green for torso, yellow for legs
+    colors = []
+    for i in range(len(joint_locations)):
+        if i <= 4:  # Head
+            colors.append([1.0, 0.0, 0.0])  # Red
+        elif i <= 12:  # Arms
+            colors.append([0.0, 0.0, 1.0])  # Blue
+        elif i <= 24:  # Torso
+            colors.append([0.0, 1.0, 0.0])  # Green
+        else:  # Legs
+            colors.append([1.0, 1.0, 0.0])  # Yellow
+    
+    # Color code connections
+    line_colors = []
+    for connection in connections:
+        if connection[0] <= 4 or connection[1] <= 4:  # Head connections
+            line_colors.append([1.0, 0.0, 0.0])  # Red
+        elif (connection[0] <= 12 and connection[0] >= 5) or (connection[1] <= 12 and connection[1] >= 5):  # Arm connections
+            line_colors.append([0.0, 0.0, 1.0])  # Blue
+        elif connection[0] <= 24 or connection[1] <= 24:  # Torso connections
+            line_colors.append([0.0, 1.0, 0.0])  # Green
+        else:  # Leg connections
+            line_colors.append([1.0, 1.0, 0.0])  # Yellow
+    
+    point_cloud.colors = o3d.utility.Vector3dVector(colors)
+    lines.colors = o3d.utility.Vector3dVector(line_colors)
+    
+    # Set background color to black for better contrast
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+    vis.add_geometry(point_cloud)
+    vis.add_geometry(lines)
+    
+    # Set render options
+    opt = vis.get_render_option()
+    opt.background_color = np.array([0, 0, 0])  # Black background
+    opt.point_size = 5.0  # Larger points
+    opt.line_width = 2.0  # Thicker lines
+    
+    vis.run()
+    vis.destroy_window()
+
+def process_frame(frame_id):
+    """Process a single frame."""
+    # Construct file paths for images
+    img_233_path = os.path.join(im_233_path, f"HPUP_033_1_1_1_L_CAM-05_{frame_id:07d}.jpeg")
+    img_235_path = os.path.join(im_235_path, f"HPUP_033_1_1_1_L_CAM-02_{frame_id:07d}.jpeg")
+
+    # Load images without resizing or zooming
+    img_233 = cv2.imread(img_233_path)
+    img_235 = cv2.imread(img_235_path)
+    
+ 
+    # Check if images are loaded correctly
+    if img_233 is None:
+        print(f"Image not found: {img_233_path}")
+        return None
+    if img_235 is None:
+        print(f"Image not found: {img_235_path}")
+        return None
+
+    # Detect pose landmarks (MediaPipe)
+    landmarks_233, pose_landmarks_233 = detect_pose(img_233)
+    landmarks_235, pose_landmarks_235 = detect_pose(img_235)
+
+    if not landmarks_233 or not landmarks_235:
+        print(f"Pose not detected in frame {frame_id}")
+        return None
+
+    # Draw pose landmarks on images for visualization with labels
+    annotated_img_233 = img_233.copy()
+    mp_drawing.draw_landmarks(
+        annotated_img_233,
+        pose_landmarks_233,
+        mp_pose.POSE_CONNECTIONS,
+        mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2),  # Red color for joints
+        mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2)   # Blue color for connections
+    )
+    
+    annotated_img_235 = img_235.copy()
+    mp_drawing.draw_landmarks(
+        annotated_img_235,
+        pose_landmarks_235,
+        mp_pose.POSE_CONNECTIONS,
+        mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2),  # Red color for joints
+        mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2)   # Blue color for connections
+    )
+
+    # Label the frames and display them
+    cv2.putText(annotated_img_233,
+                f"Frame {frame_id} - CAM-233",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=1,
+                color=(0, 255, 0),
+                thickness=2)
+    
+    cv2.putText(annotated_img_235,
+                f"Frame {frame_id} - CAM-235",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=1,
+                color=(0, 255, 0),
+                thickness=2)
+
+
+    cv2.namedWindow("CAM-233", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("CAM-233", 1280, 720)  # Fixed window size
+    cv2.namedWindow("CAM-235", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("CAM-235", 1280, 720)  # Fixed window size
+
+
+
+    cv2.imshow("CAM-233", annotated_img_233)
+    cv2.imshow("CAM-235", annotated_img_235)
+
+    # Wait for key press to proceed to the next frame or quit with 'q'
+    if cv2.waitKey(0) & 0xFF == ord('q'):
+        return None
+
+    # Triangulate 3D points using camera matrices and landmarks
+    joint_locations = triangulate_points(landmarks_233, landmarks_235, img_233, img_235)
+    
+    print(f"Frame {frame_id}: Visualizing Skeleton in Open3D...")
+    visualize_3d_pose_with_skeleton(joint_locations)
+
+# Process frames one by one
+frames = list(range(1, 11))  # Adjust range as needed (e.g., range(1, 507) for all frames)
+for frame_id in frames:
+    process_frame(frame_id)
+
+print("Processing complete!")
+
+# Close all OpenCV windows after processing is complete
+cv2.destroyAllWindows()
